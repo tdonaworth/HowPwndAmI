@@ -23,6 +23,7 @@ class Colors:
     RED = '\033[91m'                 # Red for HIGH
     ORANGE = '\033[38;5;208m'        # Orange for MEDIUM
     YELLOW = '\033[93m'              # Yellow for LOW
+    GREEN = '\033[92m'               # Green for safe/info
     LIGHT_BLUE = '\033[94m'          # Light blue for INFO
     RESET = '\033[0m'                # Reset to default
     BOLD = '\033[1m'
@@ -448,7 +449,7 @@ class CredentialScanner:
         report.append("RECOMMENDATIONS")
         report.append("=" * 80)
         report.append("""
-1. Use credential managers (1Password, LastPass, system keychain) instead of files
+1. Use credential managers (1Password, SecretsManager, system keychain) instead of files
 2. Implement short-lived, rotatable credentials where possible
 3. Use environment-specific credentials (dev/staging/prod)
 4. Enable MFA on all critical accounts
@@ -473,26 +474,26 @@ class CredentialScanner:
 
     def run_scan(self) -> None:
         """Execute all scanning modules."""
-        print("Starting credential exposure scan...")
+        print(f"{Colors.GREEN}Starting credential exposure scan...{Colors.RESET}")
         print()
 
-        print("→ Scanning environment variables...")
+        print(f"{Colors.YELLOW}→ Scanning environment variables...{Colors.RESET}")
         self.scan_environment()
 
-        print("→ Scanning configuration files...")
+        print(f"{Colors.YELLOW}→ Scanning configuration files...{Colors.RESET}")
         self.scan_config_files()
 
-        print("→ Scanning shell history...")
+        print(f"{Colors.YELLOW}→ Scanning shell history...{Colors.RESET}")
         self.scan_shell_history()
 
-        print("→ Scanning current directory...")
+        print(f"{Colors.YELLOW}→ Scanning current directory...{Colors.RESET}")
         self.scan_current_directory()
 
-        print("→ Checking browser storage...")
+        print(f"{Colors.YELLOW}→ Checking browser storage...{Colors.RESET}")
         self.scan_browser_tokens()
 
         print()
-        print("Scan complete!")
+        print(f"{Colors.GREEN}Scan complete!{Colors.RESET}")
         print()
 
 
@@ -505,16 +506,17 @@ def main():
     save_output = '--save' in sys.argv
 
     if not json_output:
-        print("""
-    ╔═══════════════════════════════════════════════════════════════════╗
-    ║                         HOW PWND AM I?                            ║
-    ║                                                                   ║
-    ║           Local Credential Exposure Assessment Tool              ║
-    ║                                                                   ║
-    ║  This tool scans your system for exposed credentials that        ║
-    ║  could be compromised in a supply chain attack.                  ║
-    ╚═══════════════════════════════════════════════════════════════════╝
-    """)
+        print(
+            f"{Colors.YELLOW}\n"
+            "╔═══════════════════════════════════════════════════════════════════╗\n"
+            "║                         HOW PWND AM I?                            ║\n"
+            "║                                                                   ║\n"
+            "║           Local Credential Exposure Assessment Tool               ║\n"
+            "║                                                                   ║\n"
+            "║  This tool scans your system for exposed credentials that         ║\n"
+            "║  could be compromised in a supply chain attack.                   ║\n"
+            f"╚═══════════════════════════════════════════════════════════════════╝\n{Colors.RESET}"
+        )
 
     scanner = CredentialScanner()
     scanner.run_scan()
