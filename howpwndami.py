@@ -282,7 +282,7 @@ class CredentialScanner:
                     risk_level=RiskLevel.HIGH,
                     description=f"Found {len(matches)} potentially sensitive command(s) in history",
                     details=matches[:10],  # Limit to first 10
-                    remediation="Consider clearing shell history or using 'history -d' to remove sensitive commands. Avoid putting credentials in command-line arguments."
+                    remediation="Consider clearing shell history or using 'history -d <line_number>' to remove sensitive command lines or 'history -c' to clear the entire history. Avoid putting credentials in command-line arguments."
                 ))
 
     def scan_current_directory(self) -> None:
