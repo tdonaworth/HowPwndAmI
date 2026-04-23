@@ -449,18 +449,17 @@ class CredentialScanner:
         report.append("RECOMMENDATIONS")
         report.append("=" * 80)
         report.append("""
-1. Use credential managers (1Password, SecretsManager, system keychain) instead of files
-2. Implement short-lived, rotatable credentials where possible
-3. Use environment-specific credentials (dev/staging/prod)
-4. Enable MFA on all critical accounts
-5. Regularly audit and rotate credentials
-6. Use secret scanning tools in CI/CD pipelines
-7. Implement least-privilege access principles
-8. Monitor for unusual access patterns
-9. Keep sensitive config files with 600 permissions (user read/write only)
-10. Never commit credentials to version control
+            1. Use credential managers (1Password, SecretsManager, system keychain) instead of files
+            2. Implement short-lived, rotatable credentials where possible
+            3. Use environment-specific credentials (dev/staging/prod)
+            4. Enable MFA on all critical accounts
+            5. Regularly audit and rotate credentials
+            6. Use secret scanning tools in CI/CD pipelines
+            7. Implement least-privilege access principles
+            8. Monitor for unusual access patterns
+            9. Keep sensitive config files with 600 permissions (user read/write only)
+            10. Never commit credentials to version control
         """)
-
         report.append("\n" + "=" * 80)
         report.append("⚠️  This tool provides a snapshot of your current exposure.")
         report.append("For comprehensive security, combine with:")
