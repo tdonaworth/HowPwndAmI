@@ -76,6 +76,16 @@ class CredentialScanner:
         r'.*CERT.*',
     ]
 
+    # Environment variable patterns to exclude (typically non-sensitive service endpoints)
+    NON_SENSITIVE_PATTERNS = [
+        r'.*_URL$',       # Endpoints/URLs (e.g., GITHUB_API_URL, DATABASE_URL is an exception)
+        r'.*_URI$',       # URIs
+        r'.*_ENDPOINT$',  # Service endpoints
+        r'.*_HOST$',      # Host addresses
+        r'.*_DOMAIN$',    # Domain names
+        r'.*_ADDRESS$',   # Network addresses
+    ]
+
     # Specific environment variables known to contain credentials
     KNOWN_SENSITIVE_VARS = {
         'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN',
@@ -146,6 +156,15 @@ class CredentialScanner:
 
         # Check pattern-matched variables
         for var in os.environ:
+            # Skip if matches non-sensitive pattern (unless in KNOWN_SENSITIVE_VARS)
+            if var not in self.KNOWN_SENSITIVE_VARS:
+                is_non_sensitive = any(
+                    re.match(pattern, var, re.IGNORECASE)
+                    for pattern in self.NON_SENSITIVE_PATTERNS
+                )
+                if is_non_sensitive:
+                    continue
+
             for pattern in self.SENSITIVE_ENV_PATTERNS:
                 if re.match(pattern, var, re.IGNORECASE):
                     sensitive_vars.add(var)
