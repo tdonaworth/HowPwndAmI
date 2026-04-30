@@ -17,6 +17,7 @@ howpwndami_report.html
 howpwndami_report.md
 howpwndami_report.txt
 *.log
+fix_credentials.sh
 
 # IDE
 .vscode/
