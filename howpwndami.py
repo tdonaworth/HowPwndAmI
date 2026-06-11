@@ -11,6 +11,7 @@ import json
 import re
 import glob
 import hashlib
+import shlex
 from pathlib import Path
 from typing import Dict, List, Set, Optional
 from dataclasses import dataclass, field
@@ -49,6 +50,13 @@ class RiskLevel(Enum):
 
 
 @dataclass
+class RemediationCommand:
+    command: str          # Shell command to run
+    description: str      # Human-readable comment for the script
+    destructive: bool = False  # If True, script prompts before executing
+
+
+@dataclass
 class Finding:
     category: str
     location: str
@@ -56,6 +64,7 @@ class Finding:
     description: str
     details: List[str] = field(default_factory=list)
     remediation: str = ""
+    remediation_commands: List[RemediationCommand] = field(default_factory=list)
 
 
 class CredentialScanner:
@@ -172,10 +181,16 @@ class CredentialScanner:
 
         if sensitive_vars:
             details = []
+            remediation_commands = []
             for var in sorted(sensitive_vars):
                 value = os.environ[var]
                 redacted = self.redact(value)
                 details.append(f"{var} = {redacted}")
+                remediation_commands.append(RemediationCommand(
+                    command=f"unset {var}",
+                    description=f"Remove {var} from current shell session (does not affect .bashrc/.zshrc)",
+                    destructive=False
+                ))
 
             self.findings.append(Finding(
                 category="Environment Variables",
@@ -183,7 +198,8 @@ class CredentialScanner:
                 risk_level=RiskLevel.CRITICAL,
                 description=f"Found {len(sensitive_vars)} sensitive environment variable(s)",
                 details=details,
-                remediation="These credentials are loaded in memory and accessible to any process running as your user. Consider using credential managers or scoped/temporary credentials."
+                remediation="These credentials are loaded in memory and accessible to any process running as your user. Consider using credential managers or scoped/temporary credentials.",
+                remediation_commands=remediation_commands
             ))
 
     def scan_config_files(self) -> None:
@@ -209,6 +225,14 @@ class CredentialScanner:
                 if extra_details:
                     details.extend(extra_details)
 
+                # Generate remediation command if permissions need fixing
+                remediation_commands = []
+                if perms != '600':
+                    remediation_commands.append(RemediationCommand(
+                        command=f"chmod 600 {shlex.quote(str(full_path))}",
+                        description=f"Restrict {description} to owner read/write only (currently {perms})",
+                        destructive=False
+                    ))
                 # Adjust the remediation based on risk level
                 if risk == RiskLevel.HIGH:
                     _remediation = f"File has permissions {perms}, which may allow other users to read it. Set permissions to 600 (user read/write only) to reduce risk."
@@ -222,7 +246,8 @@ class CredentialScanner:
                     risk_level=risk,
                     description=f"{description} file found",
                     details=details,
-                    remediation=_remediation
+                    remediation=f"Ensure file has restrictive permissions (600 recommended). Current: {perms}",
+                    remediation_commands=remediation_commands
                 ))
 
     def _extract_file_details(self, path: Path, description: str) -> List[str]:
@@ -287,28 +312,42 @@ class CredentialScanner:
                     (r'(?:aws|gcloud|az).*(?:--key|--secret|--password)', 'Cloud CLI with inline credentials'),
                 ]
 
-                matches = []
-                for line_num, line in enumerate(lines[-1000:], 1):  # Check last 1000 commands
+                # Collect structured match data with exact line numbers
+                match_data = []  # List of (file_line_number, description)
+                start_index = max(0, len(lines) - 1000)
+                for file_line_num, line in enumerate(lines[start_index:], start=start_index + 1):
                     for pattern, desc in risky_patterns:
                         if re.search(pattern, line, re.IGNORECASE):
-                            matches.append(f"Line ~{len(lines)-1000+line_num}: {desc}")
+                            match_data.append((file_line_num, desc))
                             break
 
-                if matches:
-                    found_patterns.append((str(full_path), matches))
+                if match_data:
+                    details = [f"Line ~{num}: {desc}" for num, desc in match_data[:10]]
+
+                    # Build remediation commands: delete lines in REVERSE order to avoid line number shifts
+                    remediation_commands = []
+                    for file_line_num, desc in sorted(match_data, key=lambda x: x[0], reverse=True):
+                        remediation_commands.append(RemediationCommand(
+                            command=f"safe_sed_delete {file_line_num} {shlex.quote(str(full_path))}",
+                            description=f"Remove line {file_line_num} ({desc}) from history file",
+                            destructive=True
+                        ))
+
+                    found_patterns.append((str(full_path), details, remediation_commands))
 
             except Exception:
                 continue
 
         if found_patterns:
-            for path, matches in found_patterns:
+            for path, matches, remediation_commands in found_patterns:
                 self.findings.append(Finding(
                     category="Shell History",
                     location=path,
                     risk_level=RiskLevel.HIGH,
                     description=f"Found {len(matches)} potentially sensitive command(s) in history",
-                    details=matches[:10],  # Limit to first 10
-                    remediation="Consider clearing shell history or using 'history -d <line_number>' to remove sensitive command lines or 'history -c' to clear the entire history. Avoid putting credentials in command-line arguments."
+                    details=matches,
+                    remediation="Consider clearing shell history or using 'history -d <line_number>' to remove sensitive command lines or 'history -c' to clear the entire history. Avoid putting credentials in command-line arguments.",
+                    remediation_commands=remediation_commands
                 ))
 
     def scan_current_directory(self) -> None:
@@ -333,13 +372,34 @@ class CredentialScanner:
         found_files = list(set(found_files))  # Deduplicate
 
         if found_files:
+            # Check existing .gitignore entries
+            gitignore_path = cwd / '.gitignore'
+            existing_ignores = set()
+            if gitignore_path.exists():
+                try:
+                    existing_ignores = set(gitignore_path.read_text().splitlines())
+                except Exception:
+                    pass
+
+            # Generate remediation commands for files not already in .gitignore
+            remediation_commands = []
+            for f in found_files[:20]:
+                rel_path = str(Path(f).relative_to(cwd))
+                if rel_path not in existing_ignores:
+                    remediation_commands.append(RemediationCommand(
+                        command=f"echo {shlex.quote(rel_path)} >> {shlex.quote(str(gitignore_path))}",
+                        description=f"Add {rel_path} to .gitignore to prevent accidental commits",
+                        destructive=False
+                    ))
+
             self.findings.append(Finding(
                 category="Current Directory",
                 location=str(cwd),
                 risk_level=RiskLevel.HIGH,
                 description=f"Found {len(found_files)} potential credential file(s) in working directory",
                 details=[str(Path(f).relative_to(cwd)) for f in found_files[:20]],
-                remediation="Add these files to .gitignore and avoid committing them. Consider using environment variables or secret management tools instead."
+                remediation="Add these files to .gitignore and avoid committing them. Consider using environment variables or secret management tools instead.",
+                remediation_commands=remediation_commands
             ))
 
     def scan_browser_tokens(self) -> None:
@@ -402,7 +462,15 @@ class CredentialScanner:
                 "risk_level": finding.risk_level.value,
                 "description": finding.description,
                 "details": finding.details,
-                "remediation": finding.remediation
+                "remediation": finding.remediation,
+                "remediation_commands": [
+                    {
+                        "command": cmd.command,
+                        "description": cmd.description,
+                        "destructive": cmd.destructive
+                    }
+                    for cmd in finding.remediation_commands
+                ]
             })
 
         return json.dumps(report_data, indent=2)
@@ -497,6 +565,107 @@ class CredentialScanner:
 
         return "\n".join(report)
 
+    def generate_fix_script(self) -> Optional[str]:
+        """Generate a shell script with remediation commands from findings."""
+        # Collect all commands
+        all_commands = []  # List of (category, RemediationCommand)
+
+        for finding in self.findings:
+            for cmd in finding.remediation_commands:
+                all_commands.append((finding.category, cmd))
+
+        if not all_commands:
+            return None  # Nothing actionable
+
+        timestamp = __import__('datetime').datetime.now().isoformat()
+
+        lines = []
+        lines.append("#!/bin/bash")
+        lines.append("# ============================================================================")
+        lines.append("# HowPwndAmI - Auto-generated Remediation Script")
+        lines.append(f"# Generated: {timestamp}")
+        lines.append("# ============================================================================")
+        lines.append("#")
+        lines.append("# This script contains remediation commands based on a credential exposure scan.")
+        lines.append("# Review each section before running. Commands marked [DESTRUCTIVE] will prompt")
+        lines.append("# for confirmation before executing.")
+        lines.append("#")
+        lines.append("# Usage: bash fix_credentials.sh")
+        lines.append("# ============================================================================")
+        lines.append("")
+        lines.append("set -e")
+        lines.append("")
+        lines.append("# --- Helper Functions ---")
+        lines.append("")
+        lines.append("confirm() {")
+        lines.append('    read -p "[DESTRUCTIVE] $1 (y/N) " response')
+        lines.append('    case "$response" in')
+        lines.append('        [yY][eE][sS]|[yY]) return 0 ;;')
+        lines.append('        *) echo "  Skipped."; return 1 ;;')
+        lines.append('    esac')
+        lines.append("}")
+        lines.append("")
+        lines.append("# Portable in-place sed for line deletion")
+        lines.append("safe_sed_delete() {")
+        lines.append('    if sed --version 2>/dev/null | grep -q GNU; then')
+        lines.append('        sed -i "${1}d" "$2"')
+        lines.append("    else")
+        lines.append('        sed -i '"''"' "${1}d" "$2"')
+        lines.append("    fi")
+        lines.append("}")
+        lines.append("")
+        lines.append('echo "========================================"')
+        lines.append('echo "HowPwndAmI Remediation Script"')
+        lines.append('echo "========================================"')
+        lines.append('echo ""')
+        lines.append("")
+
+        # Group by category, maintaining a defined order
+        category_order = [
+            "Configuration Files",
+            "Shell History",
+            "Current Directory",
+            "Environment Variables",
+        ]
+
+        by_category = {}
+        for cat, cmd in all_commands:
+            by_category.setdefault(cat, []).append(cmd)
+
+        for category in category_order:
+            if category not in by_category:
+                continue
+            commands = by_category[category]
+
+            lines.append(f"# === {category} ===")
+            lines.append(f'echo "--- {category} ---"')
+
+            if category == "Environment Variables":
+                lines.append('echo "NOTE: unset only affects the current shell session."')
+                lines.append('echo "To permanently remove, edit your shell profile (.bashrc, .zshrc, etc.)"')
+
+            lines.append('echo ""')
+            lines.append("")
+
+            for cmd in commands:
+                lines.append(f"# {cmd.description}")
+                if cmd.destructive:
+                    lines.append(f'if confirm "{cmd.description}"; then')
+                    lines.append(f"    {cmd.command}")
+                    lines.append("fi")
+                else:
+                    lines.append(cmd.command)
+                lines.append("")
+
+            lines.append("")
+
+        lines.append('echo ""')
+        lines.append('echo "========================================"')
+        lines.append('echo "Remediation complete. Re-run howpwndami.py to verify."')
+        lines.append('echo "========================================"')
+
+        return "\n".join(lines)
+
     def run_scan(self) -> None:
         """Execute all scanning modules."""
         print(f"{Colors.GREEN}Starting credential exposure scan...{Colors.RESET}")
@@ -529,6 +698,7 @@ def main():
     # Parse arguments
     json_output = '--json' in sys.argv
     save_output = '--save' in sys.argv
+    fix_script = '--fix-script' in sys.argv
 
     if not json_output:
         print(
@@ -564,6 +734,19 @@ def main():
         with open(output_file, 'w') as f:
             f.write(report)
         print(f"\nReport saved to: {output_file}")
+
+    # Optionally generate fix script
+    if fix_script:
+        script_content = scanner.generate_fix_script()
+        if script_content is None:
+            print(f"\n{Colors.YELLOW}No actionable remediation commands found.{Colors.RESET}")
+        else:
+            output_file = 'fix_credentials.sh'
+            with open(output_file, 'w') as f:
+                f.write(script_content)
+            os.chmod(output_file, 0o700)  # Make executable
+            print(f"\n{Colors.GREEN}Remediation script generated: {output_file}{Colors.RESET}")
+            print(f"Review the script, then run: bash {output_file}")
 
 
 if __name__ == '__main__':
