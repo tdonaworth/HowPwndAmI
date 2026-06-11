@@ -13,6 +13,7 @@ This tool performs a reconnaissance scan on your local system to identify:
 - 📜 **Shell History**: Accidentally exposed credentials in command history
 - 💾 **Browser Storage**: Session tokens in browser local storage
 - 📂 **Current Directory**: Credential files in your working directory
+- 🤖 **AI Tool Permissions**: Risky permissions in Claude Code, Cursor, and other AI coding assistants
 
 All sensitive data is **redacted** in the output to prevent accidental exposure.
 
@@ -81,6 +82,21 @@ Looks for common credential file patterns:
 - `secrets.*`, `credentials.*` files
 - Service account JSON files
 
+### AI Tool Permissions
+Scans AI coding assistant settings for dangerous permission grants:
+- **Claude Code** (`~/.claude/settings.json`, `./.claude/settings.json`)
+- **Cursor** (`~/.cursor/settings.json`)
+- **Continue** (`~/.continue/config.json`)
+
+Detects risky patterns like:
+- `rm -rf *` - Overly broad deletion permissions
+- `cat ~/.ssh/id_rsa` - Direct access to private keys
+- `sudo *` - Unrestricted root access
+- `curl ... $(cat credentials)` - Credential exfiltration patterns
+- Wildcards in sensitive operations
+
+Checks both global (home directory) and project-level settings.
+
 ## Understanding the Output
 
 ### Risk Levels
@@ -110,6 +126,15 @@ Permissions: 644
 AWS Profiles: default, production, staging
 Remediation: Ensure file has restrictive permissions (600 recommended).
 Current: 644
+
+[HIGH] Claude Code Settings (global) contains 3 risky permission(s)
+Location: /Users/you/.claude/settings.json
+Details:
+  • [HIGH] rm -rf * - Overly broad recursive delete with wildcard
+  • [HIGH] cat ~/.ssh/id_rsa - Direct access to SSH private key
+  • [CRITICAL] sudo rm -rf /var/* - Allows deletion from system root directories
+Remediation: Review and remove overly permissive patterns from settings.
+Use specific, scoped permissions instead of wildcards.
 ```
 
 ## Remediation Strategies
@@ -119,6 +144,7 @@ Current: 644
 2. **Fix file permissions**: `chmod 600 ~/.ssh/id_rsa ~/.aws/credentials`
 3. **Clear shell history**: `history -c` (or selectively remove lines)
 4. **Remove .env files from git**: Add to `.gitignore`
+5. **Review AI tool permissions**: Remove overly permissive patterns from `~/.claude/settings.json` and similar files. Use specific paths instead of wildcards.
 
 ### Long-term Best Practices
 1. **Use credential managers** - 1Password, LastPass, macOS Keychain

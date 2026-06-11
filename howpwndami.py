@@ -144,6 +144,73 @@ class CredentialScanner:
         '.python_history', '.node_repl_history', '.mysql_history',
     ]
 
+    # AI Tool settings locations
+    AI_TOOL_SETTINGS = {
+        '.claude/settings.json': 'Claude Code Settings',
+        '.claude/settings.local.json': 'Claude Code Local Settings',
+        '.continue/config.json': 'Continue Settings',
+        '.cursor/settings.json': 'Cursor Settings',
+    }
+
+    # Dangerous permission patterns by risk level
+    CRITICAL_PERMISSION_PATTERNS = {
+        r'rm\s+-rf\s+/\*?$': 'Allows deletion of entire filesystem',
+        r'rm\s+-rf\s+/(?!Users/)': 'Allows deletion from system root directories',
+        r'dd\s+if=': 'Allows direct disk writes (can destroy data)',
+        r'mkfs': 'Allows filesystem formatting',
+        r'fdisk': 'Allows disk partitioning',
+        r':\(\)\{.*\|.*&\s*\}': 'Fork bomb pattern',
+        r'sudo\s+\*': 'Allows any sudo command with wildcard',
+        r'sudo\s+su': 'Allows root shell access',
+        r'su\s+-': 'Allows switching to root',
+        r'curl.*~/(\.ssh|\.aws|\.config/gcloud).*\|': 'Can exfiltrate credentials over network',
+        r'wget.*~/(\.ssh|\.aws|\.config/gcloud).*http': 'Can exfiltrate credentials over network',
+    }
+
+    HIGH_PERMISSION_PATTERNS = {
+        r'cat\s+~/\.ssh/(id_rsa|id_ed25519|id_ecdsa)(?!\.)': 'Direct access to SSH private key',
+        r'cat\s+~/\.aws/credentials': 'Direct access to AWS credentials',
+        r'cat\s+~/\.npmrc': 'Direct access to NPM credentials',
+        r'cat\s+~/\.pypirc': 'Direct access to PyPI credentials',
+        r'cat\s+/etc/shadow': 'Access to system password hashes',
+        r'rm\s+-rf\s+~/\*': 'Can delete entire home directory',
+        r'rm\s+-rf\s+\./\*': 'Can delete current directory recursively',
+        r'rm\s+-rf\s+\*': 'Overly broad recursive delete with wildcard',
+        r'chmod\s+-R\s+777': 'Overly permissive file permissions',
+        r'curl\s+-X\s+POST.*\$\(cat': 'Can exfiltrate file contents',
+        r'nc\s+.*<': 'Netcat file transfer',
+        r'base64.*\|.*curl': 'Encoded data exfiltration',
+        r'cat\s+.*\|\s*base64\s*\|.*curl': 'Encoded file exfiltration',
+    }
+
+    MEDIUM_PERMISSION_PATTERNS = {
+        r'cat\s+~/\..*\*': 'Broad access to hidden config files',
+        r'cat\s+~/\.\w+/\*': 'Broad access to hidden directories',
+        r'cat\s+/etc/\*': 'Broad access to system configuration',
+        r'find\s+/\s+-name': 'Unrestricted filesystem search from root',
+        r'curl\s+https?://\*': 'Unrestricted external HTTP requests',
+        r'wget\s+\*': 'Unrestricted downloads',
+        r'git\s+clone\s+\*': 'Clone from any repository',
+        r'kill\s+-9\s+\*': 'Kill any process',
+        r'pkill\s+\*': 'Kill processes by wildcard',
+        r'npm\s+install\s+\*': 'Install any NPM package',
+        r'pip\s+install\s+\*': 'Install any Python package',
+        r'gem\s+install\s+\*': 'Install any Ruby gem',
+        r'xargs\s+\w+': 'Broad xargs command (check context)',
+    }
+
+    LOW_PERMISSION_PATTERNS = {
+        r'echo\s+\$\{.*\}': 'Access to environment variables',
+        r'printenv': 'Print all environment variables',
+        r'cat\s+~/\.(bash_history|zsh_history)': 'Access to command history',
+        r'history\s*$': 'View shell history',
+        r'docker\s+run\s+\*': 'Run any Docker container',
+        r'docker\s+exec\s+\*': 'Execute in any container',
+        r'kubectl.*--all-namespaces': 'Broad Kubernetes access',
+        r'git\s+init\s+\*': 'Can initialize git repos anywhere',
+        r'ln\s+-s\s+.*\*': 'Create symbolic links with wildcards',
+    }
+
     def __init__(self):
         self.findings: List[Finding] = []
         self.home = Path.home()
@@ -437,6 +504,152 @@ class CredentialScanner:
                 remediation="Browser storage may contain authentication tokens for web applications. Log out of sensitive services when not in use."
             ))
 
+    def _extract_permission_pattern(self, permission_entry) -> Optional[str]:
+        """Extract the actual command pattern from a permission entry.
+
+        Handles both formats:
+        - String: "Bash(git init *)"
+        - Object: {"tool": "Bash", "pattern": "git init *"}
+        """
+        if isinstance(permission_entry, str):
+            # Parse "Bash(git init *)" format
+            match = re.match(r'^(\w+)\((.*)\)$', permission_entry)
+            if match:
+                _, pattern = match.groups()
+                return pattern
+        elif isinstance(permission_entry, dict):
+            # Handle object format {"tool": "Bash", "pattern": "..."}
+            return permission_entry.get('pattern') or permission_entry.get('command')
+
+        return None
+
+    def _check_permission_risk(self, pattern: str) -> Optional[tuple]:
+        """Check a permission pattern against known risky patterns.
+
+        Returns: (risk_level, description) or None if no match
+        """
+        # Check CRITICAL patterns first
+        for regex, description in self.CRITICAL_PERMISSION_PATTERNS.items():
+            if re.search(regex, pattern, re.IGNORECASE):
+                return (RiskLevel.CRITICAL, description)
+
+        # Check HIGH patterns
+        for regex, description in self.HIGH_PERMISSION_PATTERNS.items():
+            if re.search(regex, pattern, re.IGNORECASE):
+                return (RiskLevel.HIGH, description)
+
+        # Check MEDIUM patterns
+        for regex, description in self.MEDIUM_PERMISSION_PATTERNS.items():
+            if re.search(regex, pattern, re.IGNORECASE):
+                return (RiskLevel.MEDIUM, description)
+
+        # Check LOW patterns
+        for regex, description in self.LOW_PERMISSION_PATTERNS.items():
+            if re.search(regex, pattern, re.IGNORECASE):
+                return (RiskLevel.LOW, description)
+
+        return None
+
+    def _scan_settings_file(self, full_path: Path, description: str) -> None:
+        """Scan a single AI tool settings file for risky permissions."""
+        try:
+            with open(full_path, 'r') as f:
+                config = json.load(f)
+
+            # Extract permissions - handle different JSON structures
+            permissions = []
+
+            # Claude Code format: {"permissions": {"allow": [...]}}
+            if 'permissions' in config and 'allow' in config['permissions']:
+                permissions = config['permissions']['allow']
+            # Alternative format: {"allow": [...]}
+            elif 'allow' in config:
+                permissions = config['allow']
+
+            if not permissions:
+                return
+
+            # Check each permission for risky patterns
+            risky_permissions = []
+            for perm in permissions:
+                pattern = self._extract_permission_pattern(perm)
+                if not pattern:
+                    continue
+
+                risk_result = self._check_permission_risk(pattern)
+                if risk_result:
+                    risk_level, risk_desc = risk_result
+                    risky_permissions.append({
+                        'pattern': pattern,
+                        'original': perm,
+                        'risk_level': risk_level,
+                        'description': risk_desc
+                    })
+
+            if risky_permissions:
+                # Find the highest risk level (lowest index in enum)
+                highest_risk = min(risky_permissions, key=lambda x: list(RiskLevel).index(x['risk_level']))
+
+                details = []
+                for risky in risky_permissions:
+                    risk_color = risky['risk_level'].value
+                    details.append(f"[{risk_color}] {risky['pattern']} - {risky['description']}")
+
+                scope = "global" if str(full_path).startswith(str(self.home)) else "project"
+                self.findings.append(Finding(
+                    category="AI Tool Permissions",
+                    location=str(full_path),
+                    risk_level=highest_risk['risk_level'],
+                    description=f"{description} ({scope}) contains {len(risky_permissions)} risky permission(s)",
+                    details=details,
+                    remediation=f"Review and remove overly permissive patterns from {full_path}. Use specific, scoped permissions instead of wildcards. Consider using deny rules to restrict dangerous operations."
+                ))
+
+        except json.JSONDecodeError:
+            # Invalid JSON - report as info
+            self.findings.append(Finding(
+                category="AI Tool Permissions",
+                location=str(full_path),
+                risk_level=RiskLevel.INFO,
+                description=f"{description} file contains invalid JSON",
+                details=[],
+                remediation="Validate and fix the JSON syntax in this file."
+            ))
+        except Exception:
+            # Skip files we can't read
+            pass
+
+    def scan_ai_tool_permissions(self) -> None:
+        """Scan AI tool settings for risky permission configurations.
+
+        Checks both global settings (home directory) and project-level settings.
+        """
+        cwd = Path.cwd()
+
+        # Scan global settings (home directory)
+        for rel_path, description in self.AI_TOOL_SETTINGS.items():
+            full_path = self.home / rel_path
+            if full_path.exists():
+                self._scan_settings_file(full_path, description)
+
+        # Scan project-level settings (current directory and subdirectories)
+        project_settings_patterns = [
+            '.claude/settings.json',
+            '.claude/settings.local.json',
+            '.continue/config.json',
+            '.cursor/settings.json',
+            'claude/settings.json',  # Alternative location without dot
+        ]
+
+        for pattern in project_settings_patterns:
+            # Check in current directory
+            project_path = cwd / pattern
+            if project_path.exists() and project_path != (self.home / pattern):
+                # Extract the tool name from path for description
+                tool_name = pattern.split('/')[0].replace('.', '').title()
+                description = f"{tool_name} Project Settings"
+                self._scan_settings_file(project_path, description)
+
     def generate_json_report(self) -> str:
         """Generate a JSON report of all findings."""
         report_data = {
@@ -685,6 +898,9 @@ class CredentialScanner:
 
         print(f"{Colors.YELLOW}→ Checking browser storage...{Colors.RESET}")
         self.scan_browser_tokens()
+
+        print(f"{Colors.YELLOW}→ Scanning AI tool permissions...{Colors.RESET}")
+        self.scan_ai_tool_permissions()
 
         print()
         print(f"{Colors.GREEN}Scan complete!{Colors.RESET}")
