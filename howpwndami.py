@@ -209,13 +209,20 @@ class CredentialScanner:
                 if extra_details:
                     details.extend(extra_details)
 
+                # Adjust the remediation based on risk level
+                if risk == RiskLevel.HIGH:
+                    _remediation = f"File has permissions {perms}, which may allow other users to read it. Set permissions to 600 (user read/write only) to reduce risk."
+                elif risk == RiskLevel.MEDIUM:
+                    _remediation = f"File has permissions {perms}. Although the permissions are correct, ensure that the file is not accessible by other users and consider using a credential manager for better security."
+                
+
                 self.findings.append(Finding(
                     category="Configuration Files",
                     location=str(full_path),
                     risk_level=risk,
                     description=f"{description} file found",
                     details=details,
-                    remediation=f"Ensure file has restrictive permissions (600 recommended). Current: {perms}"
+                    remediation=_remediation
                 ))
 
     def _extract_file_details(self, path: Path, description: str) -> List[str]:
