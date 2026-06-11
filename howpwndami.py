@@ -233,6 +233,12 @@ class CredentialScanner:
                         description=f"Restrict {description} to owner read/write only (currently {perms})",
                         destructive=False
                     ))
+                # Adjust the remediation based on risk level
+                if risk == RiskLevel.HIGH:
+                    _remediation = f"File has permissions {perms}, which may allow other users to read it. Set permissions to 600 (user read/write only) to reduce risk."
+                elif risk == RiskLevel.MEDIUM:
+                    _remediation = f"File has permissions {perms}. Although the permissions are correct, ensure that the file is not accessible by other users and consider using a credential manager for better security."
+                
 
                 self.findings.append(Finding(
                     category="Configuration Files",
